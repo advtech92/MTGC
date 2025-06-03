@@ -4,7 +4,7 @@ from typing import Optional, List
 
 @dataclass
 class Card:
-    """Represents an MTG card (subset of Scryfall’s data), including color identity."""
+    """Represents an MTG card (subset of Scryfall’s data), including both full image and thumbnail."""
     id: str
     name: str
     mana_cost: Optional[str]
@@ -12,11 +12,13 @@ class Card:
     oracle_text: Optional[str]
     set_name: str
     rarity: str
-    image_url: Optional[str]
-    colors: List[str]  # e.g. ["R"], ["W","U"], or [] for colorless
+    image_url: Optional[str]       # “normal” size or better
+    thumbnail_url: Optional[str]   # small thumbnail
+    colors: List[str]              # e.g. ["R"], ["W","U"], or [] for colorless
 
     @classmethod
     def from_scryfall_json(cls, data: dict) -> "Card":
+        image_uris = data.get("image_uris", {}) or {}
         return cls(
             id=data["id"],
             name=data["name"],
@@ -25,7 +27,8 @@ class Card:
             oracle_text=data.get("oracle_text"),
             set_name=data["set_name"],
             rarity=data["rarity"],
-            image_url=data.get("image_uris", {}).get("normal"),
+            image_url=image_uris.get("normal")    ,
+            thumbnail_url=image_uris.get("small"),
             colors=data.get("colors", []),
         )
 
