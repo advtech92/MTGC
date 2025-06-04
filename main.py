@@ -1,7 +1,7 @@
-# main.py
 import os
 import io
-import subprocess, shlex
+import subprocess
+import shlex
 import requests
 import winsound
 import webbrowser
@@ -15,6 +15,19 @@ from deck_manager import save_deck as dm_save_deck, load_deck, list_saved_decks
 from collection_manager import load_collection, save_collection
 from battle_simulator import simulate_match, record_manual_result, load_match_history
 from models import Deck, Card
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Play a custom WAV if available; otherwise default beep on error only.
+# ──────────────────────────────────────────────────────────────────────────────
+def play_sound(sound_name: str):
+    path = os.path.join("assets", "sounds", f"{sound_name}.wav")
+    if os.path.isfile(path):
+        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+    else:
+        # Only make a sound on error; button clicks are now silent.
+        pass
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # VERSIONING (build number from Git commits, fallback __version__)
@@ -80,7 +93,7 @@ def check_for_updates(local_version: str, repo: str) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MTGDeckBuilder GUI
+# MAIN APPLICATION
 # ──────────────────────────────────────────────────────────────────────────────
 class MTGDeckBuilder(tk.Tk):
     def __init__(self):
@@ -88,19 +101,19 @@ class MTGDeckBuilder(tk.Tk):
         self.title("MTG Deck Builder")
         self.geometry("1200x750")
 
-        # Ensure data folders/files
+        # Ensure data folders/files exist
         init_cache_db()
         _ = load_collection()
         _ = load_match_history()
 
-        # Theme tracking
+        # Track theme: "dark" or "light"
         self.theme = tk.StringVar(value="dark")
 
-        # Current deck
+        # Currently loaded Deck
         self.current_deck: Deck | None = None
 
         # Caches
-        self.card_cache: dict[str, Card] = {}  # name → Card
+        self.card_cache: dict[str, Card] = {}
         self.search_images: dict[str, ImageTk.PhotoImage] = {}
         self.coll_images: dict[str, dict[str, ImageTk.PhotoImage]] = {
             tab: {} for tab in ["All", "Black", "White", "Red", "Green", "Blue", "Unmarked", "Tokens"]
@@ -123,7 +136,7 @@ class MTGDeckBuilder(tk.Tk):
         self.after(1000, lambda: check_for_updates(local_ver, GITHUB_REPO))
 
     # -----------------------------------------------------------------------------
-    # Preload W/U/B/R/G icons
+    # Preload W/U/B/R/G color icons
     # -----------------------------------------------------------------------------
     def _load_color_icons(self):
         icon_folder = os.path.join("assets", "icons")
@@ -136,17 +149,17 @@ class MTGDeckBuilder(tk.Tk):
                 self.color_icon_images[symbol] = None
 
     # -----------------------------------------------------------------------------
-    # Ensure sounds folder
+    # Ensure sound folder
     # -----------------------------------------------------------------------------
     def _load_sounds(self):
         sound_folder = os.path.join("assets", "sounds")
         os.makedirs(sound_folder, exist_ok=True)
 
     # -----------------------------------------------------------------------------
-    # Build all widgets (including Combobox for autocomplete)
+    # Create all widgets (search is now a plain Entry again)
     # -----------------------------------------------------------------------------
     def _build_widgets(self):
-        # Deck controls (top)
+        # --- Top row: Deck controls + theme toggle ---
         self.deck_frame = ttk.LabelFrame(self, text="Deck Controls", padding=8)
         self.new_deck_btn = ttk.Button(self.deck_frame, text="New Deck", command=self._on_new_deck)
         self.load_deck_btn = ttk.Button(self.deck_frame, text="Load Deck", command=self._on_load_deck)
@@ -164,7 +177,7 @@ class MTGDeckBuilder(tk.Tk):
             command=self.apply_theme
         )
 
-        # Collection panel with tabs (left)
+        # --- Collection panel with tabs (left) ---
         self.coll_frame = ttk.LabelFrame(self, text="Your Collection", padding=8)
         self.coll_notebook = ttk.Notebook(self.coll_frame)
         self.coll_tabs = {}
@@ -187,26 +200,35 @@ class MTGDeckBuilder(tk.Tk):
         self.coll_qty_spin = ttk.Spinbox(self.coll_frame, from_=1, to=1000, width=6)
         self.coll_set_qty_btn = ttk.Button(self.coll_frame, text="Set Quantity", command=self._on_set_coll_qty)
 
-        # Right side: Search panel + Deck panel + Preview
+        # --- Right side: Search panel + Deck panel + Preview ---
         self.right_frame = ttk.Frame(self)
 
-        # Search / Add Cards
+        # Search / Add Cards (plain Entry)
         self.search_frame = ttk.LabelFrame(self.right_frame, text="Search / Add Cards", padding=8)
-        self.search_entry = ttk.Combobox(self.search_frame, width=30)
-        self.search_entry.set("")
-        self.search_entry.bind("<<ComboboxSelected>>", lambda e: self._on_autocomplete_select())
-        self.search_entry.bind("<KeyRelease>", lambda e: self._update_autocomplete())
-        self.search_entry.bind("<FocusIn>", lambda e: self.search_entry.select_range(0, tk.END))
+        self.preview_container = ttk.Frame(self.search_frame)
+        self.preview_frame = ttk.Frame(self.preview_container, borderwidth=1, relief="solid")
+        self.preview_inner = ttk.Frame(self.preview_frame, padding=1)
+        self.preview_frame.configure(width=200, height=200)
+        self.preview_frame.grid_propagate(False)
+        self.card_image_label = ttk.Label(self.preview_inner)
+        self.color_icons_frame = ttk.Frame(self.preview_frame)
+        self.search_entry = ttk.Entry(self.search_frame, width=30)
+        self.search_entry.bind("<Return>", lambda e: self._on_perform_search())
         self.search_btn = ttk.Button(self.search_frame, text="Search", command=self._on_perform_search)
         self.results_tree = ttk.Treeview(self.search_frame, height=12, columns=("info",), show="tree")
         self.results_scroll = ttk.Scrollbar(self.search_frame, orient="vertical", command=self.results_tree.yview)
         self.results_tree.configure(yscrollcommand=self.results_scroll.set)
         self.results_tree.bind("<<TreeviewSelect>>", self._on_result_select)
-        self.add_qty_label = ttk.Label(self.search_frame, text="Qty:")
-        self.add_qty_spin = ttk.Spinbox(self.search_frame, from_=1, to=20, width=5)
+        self.qty_add_frame = ttk.Frame(self.preview_container)
+        self.add_qty_label = ttk.Label(self.qty_add_frame, text="Qty:")
+        self.add_qty_spin  = ttk.Spinbox(self.qty_add_frame, from_=1, to=20, width=5)
         self.add_qty_spin.set("1")
-        self.add_to_coll_btn = ttk.Button(self.search_frame, text="Add to Collection", command=self._on_add_to_collection)
-        self.add_to_deck_btn = ttk.Button(self.search_frame, text="Add to Deck", command=self._on_add_to_deck)
+        self.add_to_coll_btn = ttk.Button(
+            self.qty_add_frame, text="Add to Collection", command=self._on_add_to_collection
+        )
+        self.add_to_deck_btn = ttk.Button(
+            self.qty_add_frame, text="Add to Deck",       command=self._on_add_to_deck
+        )
 
         # Deck panel with tabs
         self.deck_view_frame = ttk.LabelFrame(self.right_frame, text="Deck Contents", padding=8)
@@ -231,17 +253,12 @@ class MTGDeckBuilder(tk.Tk):
         self.deck_qty_spin = ttk.Spinbox(self.deck_view_frame, from_=1, to=1000, width=6)
         self.deck_set_qty_btn = ttk.Button(self.deck_view_frame, text="Set Quantity", command=self._on_set_deck_qty)
 
-        # Card preview (bottom)
-        self.preview_frame = ttk.LabelFrame(self, text="Card Preview", padding=8)
-        self.card_image_label = ttk.Label(self.preview_frame)
-        self.color_icons_frame = ttk.Frame(self.preview_frame)
-
     # -----------------------------------------------------------------------------
-    # Layout everything with pack() and grid()
+    # Arrange everything with pack() and grid()
     # -----------------------------------------------------------------------------
     def _layout_widgets(self):
-        # Deck controls
-        self.deck_frame.pack(fill="x", padx=10, pady=(10,5))
+        # ─── Deck controls (top) ───────────────────────────────────────────
+        self.deck_frame.pack(fill="x", padx=10, pady=(10, 5))
         self.new_deck_btn.grid(row=0, column=0, padx=4, pady=4)
         self.load_deck_btn.grid(row=0, column=1, padx=4, pady=4)
         self.save_deck_btn.grid(row=0, column=2, padx=4, pady=4)
@@ -251,60 +268,94 @@ class MTGDeckBuilder(tk.Tk):
         self.theme_toggle.grid(row=0, column=6, padx=20, pady=4)
         self.deck_name_label.grid(row=0, column=7, padx=10, pady=4, sticky="w")
 
-        # Collection panel
+        # ─── Collection panel (left) ────────────────────────────────────────
         self.coll_frame.pack(fill="y", side="left", padx=(10,5), pady=5)
         self.coll_frame.configure(width=280)
-        self.coll_notebook.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # 1) “Remove from Collection” at top
         self.remove_from_coll_btn.pack(fill="x", padx=4, pady=(4,4))
+
+        # 2) Tabs for All/Black/White/etc.
+        self.coll_notebook.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # 3) Quantity + Set Quantity under the Collection tree
         qty_frame_c = ttk.Frame(self.coll_frame)
         qty_frame_c.pack(fill="x", padx=4, pady=(0,10))
         self.coll_qty_label.pack(in_=qty_frame_c, side="left")
-        self.coll_qty_spin.pack(in_=qty_frame_c, side="left", padx=(4,10))
-        self.coll_set_qty_btn.pack(in_=qty_frame_c, side="left")
+        self.coll_qty_spin.pack(in_=qty_frame_c,    side="left", padx=(4,10))
+        self.coll_set_qty_btn.pack(in_=qty_frame_c,  side="left")
 
-        # Right side: search + deck
+        # ─── Right side: Search panel + Deck panel ──────────────────────────
         self.right_frame.pack(fill="both", expand=True, side="left", padx=(5,10), pady=5)
         self.right_frame.columnconfigure(0, weight=1)
         self.right_frame.columnconfigure(1, weight=1)
         self.right_frame.rowconfigure(0, weight=1)
 
-        # Search panel
-        self.search_frame.grid(row=0, column=0, sticky="nsew", padx=(0,5))
+        # --- Search panel (right_frame at row=0, col=0) ---
+        self.search_frame.grid(row=0, column=0, sticky="nsew", padx=(0,5), pady=(0,0))
+        # Let the search results expand vertically and horizontally
         self.search_frame.columnconfigure(0, weight=1)
         self.search_frame.rowconfigure(1, weight=1)
 
+        # Row 0: Search entry + Search button
         self.search_entry.grid(row=0, column=0, padx=4, pady=4, sticky="w")
-        self.search_btn.grid(row=0, column=1, padx=4, pady=4, sticky="w")
+        self.search_btn   .grid(row=0, column=1, padx=4, pady=4, sticky="w")
 
-        self.results_tree.grid(row=1, column=0, columnspan=2, padx=(4,0), pady=4, sticky="nsew")
-        self.results_scroll.grid(row=1, column=2, sticky="ns", pady=4)
+        # Row 1: search results (col=0), scrollbar (col=1), preview_container (col=2)
+        self.results_tree  .grid(row=1, column=0, padx=(4,0), pady=4, sticky="nsew")
+        self.results_scroll.grid(row=1, column=1, sticky="ns", pady=4)
+        self.preview_container.grid(row=1, column=2, padx=(10,4), pady=4, sticky="n")
 
-        self.add_qty_label.grid(row=2, column=0, padx=4, pady=(4,10), sticky="w")
-        self.add_qty_spin.grid(row=2, column=1, padx=4, pady=(4,10), sticky="w")
-        self.add_to_coll_btn.grid(row=2, column=2, padx=4, pady=(4,10), sticky="w")
-        self.add_to_deck_btn.grid(row=2, column=3, padx=4, pady=(4,10), sticky="w")
+        # Keep results_tree filling space; preview_container stays its natural size
+        self.search_frame.rowconfigure(1, weight=1)
+        self.search_frame.columnconfigure(2, weight=0)
 
-        # Deck panel
-        self.deck_view_frame.grid(row=0, column=1, sticky="nsew", padx=(5,0))
+        # ─── Inside preview_container ────────────────────────────────────
+        # Row 0: preview_frame (auto‐sizes to card image + 1px border)
+        # Row 1: qty_add_frame (holds the spinbox and two “Add” buttons side by side)
+
+        self.preview_container.columnconfigure(0, weight=0)
+        self.preview_container.rowconfigure(0, weight=0)
+        self.preview_container.rowconfigure(1, weight=0)
+
+        # 1) Place the framed preview (borderwidth=1, relief="solid")
+        self.preview_frame.grid(row=0, column=0, padx=0, pady=0, sticky="n")
+        #    Inside the frame, pack preview_inner (which holds a 1px padding)
+        self.preview_inner.pack(fill="both", expand=True)
+        #    And pack the image label inside that
+        self.card_image_label.pack(expand=True)
+
+        # 2) Immediately under that, place qty_add_frame
+        self.qty_add_frame.grid(row=1, column=0, pady=(4,4))
+
+        #    Inside qty_add_frame, arrange: “Qty:” label, spinbox, Add to Collection, Add to Deck
+        self.add_qty_label.grid(row=0, column=0, padx=(0,4))
+        self.add_qty_spin .grid(row=0, column=1, padx=(0,10))
+        self.add_to_coll_btn.grid(row=0, column=2, padx=(0,4))
+        self.add_to_deck_btn .grid(row=0, column=3, padx=(0,4))
+
+        # Row 2 of search_frame: we no longer need a quantity row, because we moved
+        # the spinbox into qty_add_frame. If you want an extra blank row, you can comment this out.
+
+        # --- Deck panel (right_frame at row=0, col=1) ---
+        self.deck_view_frame.grid(row=0, column=1, sticky="nsew", padx=(5,0), pady=(0,0))
         self.deck_view_frame.columnconfigure(0, weight=1)
         self.deck_view_frame.rowconfigure(0, weight=1)
 
-        self.deck_notebook.pack(fill="both", expand=True, padx=4, pady=4)
+        # “Remove Selected” at top of deck_view_frame
         self.remove_card_btn.pack(fill="x", padx=4, pady=(4,4))
+
+        # Then the deck’s Notebook (tabs) below, which expands
+        self.deck_notebook.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # Qty + Set Quantity under the Deck notebook
         qty_frame_d = ttk.Frame(self.deck_view_frame)
         qty_frame_d.pack(fill="x", padx=4, pady=(0,10))
-        self.deck_qty_label.pack(in_=qty_frame_d, side="left")
-        self.deck_qty_spin.pack(in_=qty_frame_d, side="left", padx=(4,10))
+        self.deck_qty_label.pack(  in_=qty_frame_d, side="left")
+        self.deck_qty_spin.pack(  in_=qty_frame_d, side="left", padx=(4,10))
         self.deck_set_qty_btn.pack(in_=qty_frame_d, side="left")
 
-        # Preview panel
-        self.preview_frame.pack(fill="x", padx=10, pady=(0,10))
-        self.preview_frame.columnconfigure(0, weight=1)
-        self.preview_frame.rowconfigure(0, weight=1)
-        self.card_image_label.grid(row=0, column=0, padx=4, pady=4)
-        self.color_icons_frame.grid(row=1, column=0, padx=4, pady=(4,8))
-
-        # Populate collection + deck
+        # ─── Finally, refresh both lists ───────────────────────────────────
         self._refresh_collection()
         self._refresh_deck()
 
@@ -339,7 +390,6 @@ class MTGDeckBuilder(tk.Tk):
         style.map("Treeview", background=[("selected", select_bg)])
         style.configure("TEntry", fieldbackground=entry_bg, foreground=entry_fg)
         style.configure("TSpinbox", fieldbackground=entry_bg, foreground=entry_fg)
-        style.configure("TCombobox", fieldbackground=entry_bg, foreground=entry_fg)
 
         self.configure(background=bg)
         for frame in [self.deck_frame, self.coll_frame, self.search_frame,
@@ -347,43 +397,9 @@ class MTGDeckBuilder(tk.Tk):
             frame.configure(style="TLabelframe")
 
     # -----------------------------------------------------------------------------
-    # Autocomplete: update Combobox values as user types
-    # -----------------------------------------------------------------------------
-    def _update_autocomplete(self):
-        text = self.search_entry.get().strip()
-        if len(text) < 2:
-            return
-        # Fetch up to 10 matching card names
-        try:
-            results = search_cards(text + "*",)  # wildcard to get broader matches
-        except Exception:
-            return
-        names = [c.name for c in results[:10]]
-        # Update the Combobox dropdown
-        self.search_entry["values"] = names
-        # If there are suggestions, open the dropdown
-        if names:
-            self.search_entry.event_generate("<Down>")
-
-    # -----------------------------------------------------------------------------
-    # When the user selects from autocomplete dropdown
-    # -----------------------------------------------------------------------------
-    def _on_autocomplete_select(self):
-        selected = self.search_entry.get().strip()
-        if not selected:
-            return
-        # Fetch full Card and preview it
-        card = self.card_cache.get(selected) or get_card_by_name(selected)
-        if not card:
-            return
-        self.card_cache[card.name] = card
-        self._show_preview(card)
-
-    # -----------------------------------------------------------------------------
-    # Perform a normal “Search” (when user clicks Search)
+    # Perform “Search” (when user clicks Search or hits Enter)
     # -----------------------------------------------------------------------------
     def _on_perform_search(self):
-        play_sound("click")
         query = self.search_entry.get().strip()
         if not query:
             return
@@ -438,12 +454,15 @@ class MTGDeckBuilder(tk.Tk):
         self._show_preview(card)
 
     # -----------------------------------------------------------------------------
-    # Show full image + color icons in preview
+    # Show full image + color pips in preview
     # -----------------------------------------------------------------------------
     def _show_preview(self, card: Card):
+        # Clear out any old contents in color icons and image:
         for w in self.color_icons_frame.winfo_children():
             w.destroy()
+        self.card_image_label.config(image="", text="")
 
+        # Display color pips at the top inside preview_inner:
         x = 0
         for symbol in card.colors:
             icon = self.color_icon_images.get(symbol)
@@ -459,9 +478,15 @@ class MTGDeckBuilder(tk.Tk):
                 resp.raise_for_status()
                 img_data = resp.content
                 image = Image.open(io.BytesIO(img_data))
-                image.thumbnail((250,350), Image.LANCZOS)
+                # Optional: resize the image so it’s not gigantic.
+                # For example, if you want max width=180, max height=260, do:
+                max_w, max_h = 180, 260
+                image.thumbnail((max_w, max_h), Image.LANCZOS)
+
                 photo = ImageTk.PhotoImage(image)
-                self.preview_photo = photo
+                self.preview_photo = photo  # keep a reference
+
+                # Put the image in the Label:
                 self.card_image_label.config(image=photo, text="")
             except Exception:
                 self.card_image_label.config(text="Could not load image", image="")
@@ -470,11 +495,16 @@ class MTGDeckBuilder(tk.Tk):
             self.card_image_label.config(text="No image available", image="")
             self.preview_photo = None
 
+        # Now re‐pack / grid so that preview_frame wraps to its contents:
+        # (If it was hidden or empty before, we need to ensure layout is updated.)
+        self.preview_inner.update_idletasks()
+        self.preview_frame.update_idletasks()
+        self.preview_container.update_idletasks()
+
     # -----------------------------------------------------------------------------
-    # Add to Collection (silent, cache thumbnails automatically)
+    # Add to Collection (silent)—auto-caches thumbnails on refresh
     # -----------------------------------------------------------------------------
     def _on_add_to_collection(self):
-        play_sound("click")
         coll = load_collection()
         sel = self.results_tree.selection()
         if not sel:
@@ -495,7 +525,7 @@ class MTGDeckBuilder(tk.Tk):
         self._refresh_collection()
 
         # Clear the search box so user can type another name
-        self.search_entry.set("")
+        self.search_entry.delete(0, tk.END)
         self.search_entry.focus_set()
         self.results_tree.delete(*self.results_tree.get_children())
         self._clear_preview()
@@ -504,7 +534,6 @@ class MTGDeckBuilder(tk.Tk):
     # Add to Deck (silent)
     # -----------------------------------------------------------------------------
     def _on_add_to_deck(self):
-        play_sound("click")
         if not self.current_deck:
             return
         sel = self.results_tree.selection()
@@ -534,7 +563,6 @@ class MTGDeckBuilder(tk.Tk):
     # Remove selected from collection
     # -----------------------------------------------------------------------------
     def _on_remove_from_collection(self):
-        play_sound("click")
         current_tab = self.coll_notebook.tab(self.coll_notebook.select(), "text")
         tree = self.coll_trees[current_tab]
         sel = tree.selection()
@@ -572,7 +600,6 @@ class MTGDeckBuilder(tk.Tk):
     # Set quantity in collection (inline)
     # -----------------------------------------------------------------------------
     def _on_set_coll_qty(self):
-        play_sound("click")
         current_tab = self.coll_notebook.tab(self.coll_notebook.select(), "text")
         tree = self.coll_trees[current_tab]
         sel = tree.selection()
@@ -623,7 +650,7 @@ class MTGDeckBuilder(tk.Tk):
 
         for tab_name, tree in self.coll_trees.items():
             tree.delete(*tree.get_children())
-            # Do NOT clear self.coll_images[tab_name]; reuse cached thumbnails
+            # Keep self.coll_images[tab_name] intact—reuse cached thumbnails
             fnt_spec = ttk.Style().lookup("Treeview", "font")
             if fnt_spec:
                 fnt = tkfont.Font(font=fnt_spec)
@@ -662,10 +689,9 @@ class MTGDeckBuilder(tk.Tk):
             tree.column("#0", width=max_width)
 
     # -----------------------------------------------------------------------------
-    # New Deck
+    # “New Deck” callback
     # -----------------------------------------------------------------------------
     def _on_new_deck(self):
-        play_sound("click")
         name = simpledialog.askstring("New Deck", "Enter deck name:", parent=self)
         if not name:
             return
@@ -675,10 +701,9 @@ class MTGDeckBuilder(tk.Tk):
         self._clear_preview()
 
     # -----------------------------------------------------------------------------
-    # Load Deck
+    # “Load Deck” callback
     # -----------------------------------------------------------------------------
     def _on_load_deck(self):
-        play_sound("click")
         choices = list_saved_decks()
         if not choices:
             return
@@ -697,10 +722,9 @@ class MTGDeckBuilder(tk.Tk):
             self._clear_preview()
 
     # -----------------------------------------------------------------------------
-    # Save Deck
+    # “Save Deck” callback
     # -----------------------------------------------------------------------------
     def _on_save_deck(self):
-        play_sound("click")
         if not self.current_deck:
             return
         dm_save_deck(self.current_deck)
@@ -736,10 +760,9 @@ class MTGDeckBuilder(tk.Tk):
         self._show_preview(card)
 
     # -----------------------------------------------------------------------------
-    # Set quantity in deck (inline)
+    # “Set Quantity” in Deck callback
     # -----------------------------------------------------------------------------
     def _on_set_deck_qty(self):
-        play_sound("click")
         if not self.current_deck:
             return
         current_tab = self.deck_notebook.tab(self.deck_notebook.select(), "text")
@@ -769,10 +792,9 @@ class MTGDeckBuilder(tk.Tk):
         self._refresh_deck()
 
     # -----------------------------------------------------------------------------
-    # Remove selected from deck
+    # “Remove Selected” from deck callback
     # -----------------------------------------------------------------------------
     def _on_remove_selected(self):
-        play_sound("click")
         if not self.current_deck:
             return
         current_tab = self.deck_notebook.tab(self.deck_notebook.select(), "text")
@@ -797,7 +819,7 @@ class MTGDeckBuilder(tk.Tk):
         self._clear_preview()
 
     # -----------------------------------------------------------------------------
-    # Refresh the deck tabs + autofit
+    # Refresh deck tabs + autofit columns
     # -----------------------------------------------------------------------------
     def _refresh_deck(self):
         if not self.current_deck:
@@ -845,7 +867,7 @@ class MTGDeckBuilder(tk.Tk):
                             resp = requests.get(card.thumbnail_url, timeout=5)
                             resp.raise_for_status()
                             pil = Image.open(io.BytesIO(resp.content))
-                            pil.thumbnail((24,36), Image.LANCZOS)
+                            pil.thumbnail((24, 36), Image.LANCZOS)
                             img_obj = ImageTk.PhotoImage(pil)
                             self.deck_images[tab_name][card_name] = img_obj
                         except Exception:
@@ -879,10 +901,152 @@ class MTGDeckBuilder(tk.Tk):
         self.preview_photo = None
 
     # -----------------------------------------------------------------------------
-    # Simulate Battle
+    # “Smart Build Deck” callback
+    # -----------------------------------------------------------------------------
+    def _on_smart_build(self):
+        color_input = simpledialog.askstring(
+            "Smart Build: Colors",
+            "Enter 1–3 colors (e.g. R G) separated by spaces:",
+            parent=self
+        )
+        if not color_input:
+            return
+
+        colors = [c.strip().upper() for c in color_input.split() if c.strip().upper() in {"W","U","B","R","G"}]
+        if not 1 <= len(colors) <= 3:
+            play_sound("error")
+            messagebox.showerror("Invalid Colors", "You must pick 1–3 of W, U, B, R, G.")
+            return
+
+        history = load_match_history()
+        archetypes = ["Aggro", "Midrange", "Control"]
+        best_arch = None
+        best_rate = -1.0
+        combo = "/".join(colors)
+
+        for arch in archetypes:
+            total = wins = 0
+            for record in history:
+                dn = record.get("deck", "")
+                if dn.startswith(arch) and combo in dn:
+                    res = record.get("result", "")
+                    if res in ("W","L"):
+                        total += 1
+                        if res == "W":
+                            wins += 1
+            if total > 0:
+                rate = wins / total
+                if rate > best_rate:
+                    best_rate = rate
+                    best_arch = arch
+
+        if best_arch:
+            confirm = messagebox.askokcancel(
+                "Choose Archetype",
+                f"Based on history, {best_arch} {combo} has win rate {best_rate:.0%}.\nUse it?"
+            )
+            if confirm:
+                archetype = best_arch.lower()
+            else:
+                archetype = None
+        else:
+            archetype = None
+
+        if not archetype:
+            arch_input = simpledialog.askstring(
+                "Smart Build: Archetype",
+                "Enter archetype (Aggro, Control, Midrange):",
+                parent=self
+            )
+            if not arch_input:
+                return
+            arch_input = arch_input.strip().lower()
+            if arch_input not in {"aggro", "control", "midrange"}:
+                play_sound("error")
+                messagebox.showerror("Invalid Archetype", "Must be 'Aggro', 'Control', or 'Midrange'.")
+                return
+            archetype = arch_input
+
+        deck_name = f"{archetype.capitalize()} {combo} Auto"
+        deck = Deck(name=deck_name)
+
+        land_count = 24
+        if archetype == "aggro":
+            creature_target = 24; noncreature_target = 12
+        elif archetype == "midrange":
+            creature_target = 18; noncreature_target = 18
+        else:
+            creature_target = 12; noncreature_target = 24
+
+        per_color = land_count // len(colors)
+        extra = land_count % len(colors)
+        basic_map = {"W":"Plains","U":"Island","B":"Swamp","R":"Mountain","G":"Forest"}
+        for idx, col in enumerate(colors):
+            qty = per_color + (1 if idx < extra else 0)
+            deck.add_card(basic_map[col], qty)
+
+        creature_query = f"c:{''.join(colors)} type:creature"
+        if archetype == "aggro":
+            creature_query += " cmc<=3"
+        elif archetype == "midrange":
+            creature_query += " cmc<=4"
+        else:
+            creature_query += " cmc<=5"
+        creatures = search_cards(creature_query)
+        creatures = [c for c in creatures if set(c.colors).issubset(set(colors))]
+        used = set()
+        added = 0
+        for c in creatures:
+            if added >= creature_target:
+                break
+            if c.name not in used:
+                deck.add_card(c.name, 1)
+                used.add(c.name)
+                added += 1
+
+        noncre_query = f"c:{''.join(colors)} (type:instant or type:sorcery)"
+        if archetype == "aggro":
+            noncre_query += " cmc<=3"
+        elif archetype == "midrange":
+            noncre_query += " cmc<=4"
+        else:
+            noncre_query += " cmc>=3"
+        noncre = search_cards(noncre_query)
+        noncre = [c for c in noncre if set(c.colors).issubset(set(colors))]
+        added_non = 0
+        for c in noncre:
+            if added_non >= noncreature_target:
+                break
+            if c.name not in used:
+                deck.add_card(c.name, 1)
+                used.add(c.name)
+                added_non += 1
+
+        total_cards = sum(deck.cards.values())
+        if total_cards < 60:
+            fill_needed = 60 - total_cards
+            filler = search_cards("type:creature cmc<=3")
+            for c in filler:
+                if c.name not in used:
+                    deck.add_card(c.name, 1)
+                    used.add(c.name)
+                    fill_needed -= 1
+                    if fill_needed == 0:
+                        break
+
+        self.current_deck = deck
+        self.deck_name_label.config(text=f"Deck: {deck.name} ({deck.total_cards()} cards)")
+        self._refresh_deck()
+        self._clear_preview()
+        messagebox.showinfo(
+            "Smart Build Complete",
+            f"Created deck '{deck.name}' with {deck.total_cards()} cards."
+        )
+
+    # -----------------------------------------------------------------------------
+    # “Simulate Battle” callback
     # -----------------------------------------------------------------------------
     def _on_simulate_battle(self):
-        play_sound("click")
         choices = list_saved_decks()
         if len(choices) < 2:
             return
@@ -919,10 +1083,9 @@ class MTGDeckBuilder(tk.Tk):
         )
 
     # -----------------------------------------------------------------------------
-    # Record Result
+    # “Record Result” callback
     # -----------------------------------------------------------------------------
     def _on_record_result(self):
-        play_sound("click")
         choices = list_saved_decks()
         if not choices:
             return
@@ -949,6 +1112,8 @@ class MTGDeckBuilder(tk.Tk):
             parent=self
         )
         if not result or result.upper() not in {"W","L","T"}:
+            play_sound("error")
+            messagebox.showerror("Invalid Result", "Result must be W, L, or T.")
             return
 
         record_manual_result(deck_name, opponent, result.upper())
@@ -959,7 +1124,7 @@ class MTGDeckBuilder(tk.Tk):
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     missing_icons = [s for s in ["W","U","B","R","G"]
-                     if not os.path.isfile(os.path.join("assets","icons",f"{s}.png"))]
+                     if not os.path.isfile(os.path.join("assets","icons", f"{s}.png"))]
     if missing_icons:
         print(f"Warning: Missing color icon(s) for {missing_icons} in assets/icons/. Cards will still load.")
 
